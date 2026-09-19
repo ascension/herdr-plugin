@@ -38,6 +38,11 @@ accepted) and approve the install.
 The repo root also carries `.cursor-plugin/marketplace.json`, so the directory works as a
 marketplace checkout if you install via a marketplace source instead.
 
+To install through the Grok plugin ecosystem: push this repo to GitHub, then add it as a plugin
+source in Grok Bot or run `grok plugin install <name> --trust` inside Grok Build. Installs pin
+to a commit SHA. To share it publicly, open a PR adding it to `xai-org/plugin-marketplace` —
+the catalog is open.
+
 ## Layout
 
 ```
