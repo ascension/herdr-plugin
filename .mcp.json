@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "herdr": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/servers/herdr-mcp.cjs"],
+      "placement": "client"
+    }
+  }
+}

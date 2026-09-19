@@ -1,0 +1,19 @@
+{
+  "name": "herdr",
+  "version": "0.1.0",
+  "description": "Manage coding agents running in Herdr workspaces — devin, claude, codex, pi, cursor, and others. Spawn them, hand them tasks, watch status, unblock them, and collect results via the herdr CLI or the bundled herdr MCP server.",
+  "author": {
+    "name": "Jerrod Bunce"
+  },
+  "license": "MIT",
+  "keywords": [
+    "herdr",
+    "agents",
+    "orchestration",
+    "devin",
+    "claude",
+    "codex",
+    "pi",
+    "fleet"
+  ]
+}

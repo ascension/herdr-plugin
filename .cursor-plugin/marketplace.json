@@ -1,0 +1,21 @@
+{
+  "name": "herdr",
+  "metadata": {
+    "description": "Manage coding agents running in Herdr workspaces — devin, claude, codex, pi, cursor — via the herdr CLI or bundled MCP server.",
+    "version": "0.1.0",
+    "pluginRoot": "."
+  },
+  "plugins": [
+    {
+      "name": "herdr",
+      "source": "./",
+      "description": "Manage coding agents running in Herdr workspaces — devin, claude, codex, pi, cursor — via the herdr CLI or bundled MCP server.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Jerrod Bunce"
+      },
+      "license": "MIT",
+      "keywords": ["herdr", "agents", "orchestration", "devin", "claude", "codex", "pi"]
+    }
+  ]
+}
