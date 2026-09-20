@@ -17,9 +17,9 @@ devin, claude, codex, pi, cursor, and anything else Herdr detects — through
 
 ## Prerequisites
 
-- Herdr installed and its server running (`herdr agent list` works). The skill was verified
-  against herdr 0.7.3 — the CLI surface changed in 0.7.5, and the skill tells the bot to fall
-  back to `herdr <command> --help` when a command errors.
+- Herdr installed and its server running (`herdr agent list` works). The skill and bundled MCP
+  server were verified against herdr 0.9.1 (socket protocol 22); on older 0.7.x the CLI spelling
+  differs and the skill tells the bot to fall back to `herdr <command> --help`.
 - Node.js ≥ 20 for the MCP server.
 - The agent CLIs you intend to drive on PATH (`devin`, `claude`, `codex`, `pi`, ...).
 

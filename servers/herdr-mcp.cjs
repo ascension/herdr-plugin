@@ -21122,7 +21122,13 @@ function isHerdrResponse(value) {
   return true;
 }
 function isHerdrPush(value) {
-  return isRecord(value) && typeof value["type"] === "string";
+  if (!isRecord(value)) return false;
+  if (typeof value["type"] === "string") return true;
+  if (typeof value["event"] === "string") {
+    value["type"] = value["event"];
+    return true;
+  }
+  return false;
 }
 var HerdrError = class extends Error {
   constructor(code, message) {
@@ -21132,11 +21138,13 @@ var HerdrError = class extends Error {
   }
   code;
 };
-var AGENT_STATUSES = ["idle", "working", "blocked", "done"];
+var AGENT_STATUSES = ["idle", "working", "blocked", "done", "unknown"];
 var agentStatusSchema = external_exports.string();
 var rawAgentSchema = external_exports.object({
   terminal_id: external_exports.string(),
-  agent: external_exports.string(),
+  // Absent while the pane's agent is still launching (launch_pending).
+  agent: external_exports.string().optional(),
+  name: external_exports.string().optional(),
   agent_status: agentStatusSchema,
   workspace_id: external_exports.string(),
   tab_id: external_exports.string(),
@@ -21463,7 +21471,8 @@ var HerdrClient = class {
 function shapeAgent(raw) {
   return {
     agent_id: raw.pane_id,
-    agent: raw.agent,
+    agent: raw.agent ?? "unknown",
+    ...raw.name ? { name: raw.name } : {},
     status: raw.agent_status,
     workspace_id: raw.workspace_id,
     tab_id: raw.tab_id,
@@ -21708,15 +21717,18 @@ function registerActTools(server, client) {
     "send_to_agent",
     {
       title: "Send input to a Herdr agent",
-      description: "Type text into a live agent's terminal. THIS ACTS on a real session \u2014 only target an agent_id observed via a recent list_agents call, and do not use it to answer questions about an agent (use read_pane for that). With submit=true the input is sent to the agent (trailing newline); with submit=false the text is typed but left unsubmitted for a human to review. Returns the pane's screen after sending so you can verify the effect.",
+      description: "Submit a prompt to a live agent, or type text into its terminal. THIS ACTS on a real session \u2014 only target an agent_id observed via a recent list_agents call, and do not use it to answer questions about an agent (use read_pane for that). With submit=true the prompt is delivered atomically (text + Enter as one operation) and the server refuses if the agent is blocked on input; wait_seconds makes it block until the agent settles. With submit=false the text is typed but left unsubmitted for a human to review. Returns the pane's screen afterwards so you can verify the effect.",
       inputSchema: {
         agent_id: external_exports.string().describe('Target agent_id from list_agents (e.g. "w1:p1")'),
-        text: external_exports.string().min(1).describe("The text to type, without a trailing newline"),
-        submit: external_exports.boolean().describe("true: submit to the agent (appends newline); false: type only, leave un-submitted")
+        text: external_exports.string().min(1).describe("The prompt text, without a trailing newline"),
+        submit: external_exports.boolean().describe("true: submit the prompt (atomic, refuses blocked agents); false: type only, leave un-submitted"),
+        wait_seconds: external_exports.number().min(1).max(600).optional().describe(
+          "With submit=true only: block until the agent reaches idle/blocked/done or this many seconds pass"
+        )
       },
       annotations: { readOnlyHint: false, destructiveHint: true }
     },
-    async ({ agent_id, text, submit }) => {
+    async ({ agent_id, text, submit, wait_seconds }) => {
       const agent = await resolveAgent(client, agent_id);
       if (!agent) {
         const known = (await client.listAgents()).map((a) => a.pane_id);
@@ -21724,12 +21736,19 @@ function registerActTools(server, client) {
           `No agent is running in pane "${agent_id}". Known agent_ids: ${known.length ? known.join(", ") : "(none)"}. Call list_agents and retry with a real target.`
         );
       }
-      await client.sendText(agent_id, submit ? `${text}
-` : text);
+      if (submit) {
+        await client.call("agent.prompt", {
+          target: agent_id,
+          text,
+          ...wait_seconds ? { wait: { until: ["idle", "blocked", "done"], timeout_ms: wait_seconds * 1e3 } } : {}
+        });
+      } else {
+        await client.sendText(agent_id, text);
+      }
       await new Promise((resolve) => setTimeout(resolve, SEND_EVIDENCE_DELAY_MS));
       const read = await client.readPane(agent_id, "visible", SEND_EVIDENCE_LINES);
       return ok(
-        `Sent to ${agent_id} (${agent.agent}, was ${agent.agent_status}; submit=${submit}).
+        `Sent to ${agent_id} (${agent.agent ?? "unknown"}, was ${agent.agent_status}; submit=${submit}).
 Pane now shows:
 ---
 ${read.text}`
@@ -21761,17 +21780,53 @@ ${read.text}`);
     "start_agent",
     {
       title: "Start a new agent",
-      description: "Launch a coding agent (claude, codex, \u2026) in a NEW pane split from the focused one. Returns the new agent's pane so you can immediately send_to_agent / wait_for_agent_status it.",
+      description: "Launch a coding agent in Herdr. kind is a registered agent kind (claude, codex, devin, pi, grok, cursor, gemini, muse, aider, amp, \u2026; `herdr agent start --help` lists the live set). Without pane_id, a new shell pane is split off the focused pane \u2014 cwd and direction apply to the split \u2014 and the agent launches into it; pane_id targets an existing shell pane instead. Returns the new agent's pane so you can immediately send_to_agent / wait_for_agent_status it.",
       inputSchema: {
-        name: external_exports.string().describe('Agent name as configured in Herdr, e.g. "claude"'),
-        argv: external_exports.array(external_exports.string()).min(1).describe('Command line to run, e.g. ["claude"] or ["claude", "--continue"]'),
-        cwd: external_exports.string().optional().describe("Working directory for the agent (defaults to Herdr's choice)")
+        kind: external_exports.string().describe('Agent kind registered in Herdr, e.g. "claude", "codex", "pi", "devin"'),
+        name: external_exports.string().optional().describe("Display name for the agent (defaults to kind)"),
+        args: external_exports.array(external_exports.string()).optional().describe("Extra arguments for the agent command"),
+        pane_id: external_exports.string().optional().describe("Existing shell pane to launch into; omit to split a new pane"),
+        cwd: external_exports.string().optional().describe("Working directory (only when splitting a new pane)"),
+        direction: external_exports.enum(["right", "down"]).default("right").describe("Split direction (only when splitting a new pane)"),
+        timeout_seconds: external_exports.number().min(4).max(300).default(30).describe("How long Herdr waits for the pane to become a usable shell")
       },
       annotations: { readOnlyHint: false, destructiveHint: false }
     },
-    async ({ name, argv, cwd }) => {
-      const result = await client.call("agent.start", { name, argv, ...cwd ? { cwd } : {} });
-      return ok(result);
+    async ({ kind, name, args, pane_id, cwd, direction, timeout_seconds }) => {
+      let target = pane_id;
+      if (!target) {
+        const split = await client.call("pane.split", { direction, ...cwd ? { cwd } : {} });
+        const pane = split["pane"];
+        const id = typeof pane === "object" && pane !== null ? pane["pane_id"] : void 0;
+        if (typeof id !== "string") {
+          return fail(`pane.split returned no pane_id: ${JSON.stringify(split)}`);
+        }
+        target = id;
+      }
+      const deadline = Date.now() + timeout_seconds * 1e3;
+      try {
+        for (; ; ) {
+          try {
+            return ok(
+              await client.call("agent.start", {
+                name: name ?? kind,
+                kind,
+                pane_id: target,
+                timeout_ms: timeout_seconds * 1e3,
+                ...args?.length ? { args } : {}
+              })
+            );
+          } catch (error2) {
+            const retryable = error2 instanceof Error && /not an available shell/i.test(error2.message);
+            if (!retryable || Date.now() >= deadline) throw error2;
+            await new Promise((resolve) => setTimeout(resolve, 400));
+          }
+        }
+      } catch (error2) {
+        if (!pane_id) await client.call("pane.close", { pane_id: target }).catch(() => {
+        });
+        throw error2;
+      }
     }
   );
   server.registerTool(
@@ -21830,7 +21885,7 @@ ${read.text}`);
           const agent = await resolveAgent(client, pane_id);
           if (agent) {
             return fail(
-              `Refusing: pane ${pane_id} hosts a live ${agent.agent} agent (${agent.agent_status}); closing it kills the session. If that is really intended, ask the human or use herdr_rpc explicitly.`
+              `Refusing: pane ${pane_id} hosts a live ${agent.agent ?? "unknown"} agent (${agent.agent_status}); closing it kills the session. If that is really intended, ask the human or use herdr_rpc explicitly.`
             );
           }
           await client.call("pane.close", { pane_id });
