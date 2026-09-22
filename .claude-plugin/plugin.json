@@ -5,6 +5,7 @@
   "author": {
     "name": "Jerrod Bunce"
   },
+  "repository": "https://github.com/ascension/herdr-plugin",
   "license": "MIT",
   "keywords": [
     "herdr",

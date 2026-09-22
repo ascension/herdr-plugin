@@ -14,6 +14,7 @@
       "author": {
         "name": "Jerrod Bunce"
       },
+      "repository": "https://github.com/ascension/herdr-plugin",
       "license": "MIT",
       "keywords": ["herdr", "agents", "orchestration", "devin", "claude", "codex", "pi"]
     }
