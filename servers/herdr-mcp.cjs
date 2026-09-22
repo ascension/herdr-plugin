@@ -21122,13 +21122,13 @@ function isHerdrResponse(value) {
   return true;
 }
 function isHerdrPush(value) {
-  if (!isRecord(value)) return false;
-  if (typeof value["type"] === "string") return true;
-  if (typeof value["event"] === "string") {
-    value["type"] = value["event"];
-    return true;
-  }
-  return false;
+  return isRecord(value) && (typeof value["type"] === "string" || typeof value["event"] === "string");
+}
+function pushType(push) {
+  const type = push["type"];
+  if (typeof type === "string") return type;
+  const event = push["event"];
+  return typeof event === "string" ? event : "unknown";
 }
 var HerdrError = class extends Error {
   constructor(code, message) {
@@ -21293,7 +21293,10 @@ var HerdrConnection = class {
       this.pending.set(id, { resolve, reject });
       socket.write(`${line}
 `, (error2) => {
-        if (error2 && this.pending.delete(id)) reject(error2);
+        if (error2 && this.pending.delete(id)) {
+          error2.unsent = true;
+          reject(error2);
+        }
       });
     });
   }
@@ -21327,6 +21330,7 @@ var HerdrConnection = class {
       }
     }
     if (isHerdrPush(msg)) {
+      msg.type = pushType(msg);
       this.onPush?.(msg);
     } else {
       this.log(`herdr: dropping unrecognized line: ${line.slice(0, 200)}`);
@@ -21356,19 +21360,22 @@ var HerdrClient = class {
 `));
   }
   /**
-   * Herdr (0.7.1) closes the connection after replying, which makes
-   * concurrent requests on one connection impossible — so requests are
-   * serialized through a queue, and a request that still raced a close is
+   * Herdr closes the connection after replying (observed on 0.7.x and 0.9.1),
+   * which makes concurrent requests on one connection impossible — so requests
+   * are serialized through a queue, and a request that still raced a close is
    * retried once on a fresh connection. HerdrErrors are real server answers
-   * and are never retried.
+   * and are never retried. `noRetry` is for non-idempotent methods: a request
+   * lost after the server processed it must not be re-issued.
    */
-  request(method, params = {}) {
+  request(method, params = {}, opts = {}) {
     const run = async () => {
       try {
         const connection = await this.ensureConnection();
         return await connection.request(method, params);
       } catch (error2) {
         if (error2 instanceof HerdrError) throw error2;
+        const unsent = error2.unsent === true;
+        if (opts.noRetry && !unsent) throw error2;
         const connection = await this.ensureConnection();
         return connection.request(method, params);
       }
@@ -21414,7 +21421,7 @@ var HerdrClient = class {
         connection.close();
       }
     }
-    const res = await this.request(method, params);
+    const res = await this.request(method, params, { noRetry: true });
     return parseResult(method, genericResultSchema, res);
   }
   async readPane(paneId, source, lines) {
@@ -21422,7 +21429,7 @@ var HerdrClient = class {
     return parseResult("pane.read", paneReadResultSchema, res).read;
   }
   async sendText(paneId, text) {
-    await this.request("pane.send_text", { pane_id: paneId, text });
+    await this.request("pane.send_text", { pane_id: paneId, text }, { noRetry: true });
   }
   /**
    * Stream agent-status changes for one pane over a dedicated connection.
@@ -21736,19 +21743,30 @@ function registerActTools(server, client) {
           `No agent is running in pane "${agent_id}". Known agent_ids: ${known.length ? known.join(", ") : "(none)"}. Call list_agents and retry with a real target.`
         );
       }
+      let settleNote = "";
       if (submit) {
-        await client.call("agent.prompt", {
-          target: agent_id,
-          text,
-          ...wait_seconds ? { wait: { until: ["idle", "blocked", "done"], timeout_ms: wait_seconds * 1e3 } } : {}
-        });
+        const params = { target: agent_id, text };
+        if (wait_seconds) {
+          params["wait"] = { until: ["idle", "blocked", "done"], timeout_ms: wait_seconds * 1e3 };
+        }
+        if (wait_seconds) {
+          const request = client.call("agent.prompt", params, { dedicated: true });
+          const guard = new Promise(
+            (resolve) => setTimeout(() => resolve("timeout"), wait_seconds * 1e3 + 500)
+          );
+          if (await Promise.race([request, guard]) === "timeout") {
+            settleNote = ` Prompt delivered; agent did not reach idle/blocked/done within ${wait_seconds}s.`;
+          }
+        } else {
+          await client.call("agent.prompt", params);
+        }
       } else {
         await client.sendText(agent_id, text);
       }
       await new Promise((resolve) => setTimeout(resolve, SEND_EVIDENCE_DELAY_MS));
       const read = await client.readPane(agent_id, "visible", SEND_EVIDENCE_LINES);
       return ok(
-        `Sent to ${agent_id} (${agent.agent ?? "unknown"}, was ${agent.agent_status}; submit=${submit}).
+        `Sent to ${agent_id} (${agent.agent ?? "unknown"}, was ${agent.agent_status}; submit=${submit}).${settleNote}
 Pane now shows:
 ---
 ${read.text}`
@@ -21807,15 +21825,25 @@ ${read.text}`);
       try {
         for (; ; ) {
           try {
-            return ok(
-              await client.call("agent.start", {
+            const request = client.call(
+              "agent.start",
+              {
                 name: name ?? kind,
                 kind,
                 pane_id: target,
                 timeout_ms: timeout_seconds * 1e3,
                 ...args?.length ? { args } : {}
-              })
+              },
+              { dedicated: true }
             );
+            const guard = new Promise(
+              (resolve) => setTimeout(() => resolve("timeout"), timeout_seconds * 1e3 + 500)
+            );
+            const result = await Promise.race([request, guard]);
+            if (result === "timeout") {
+              throw new Error(`agent.start did not answer within ${timeout_seconds}s`);
+            }
+            return ok(result);
           } catch (error2) {
             const retryable = error2 instanceof Error && /not an available shell/i.test(error2.message);
             if (!retryable || Date.now() >= deadline) throw error2;
@@ -21823,8 +21851,11 @@ ${read.text}`);
           }
         }
       } catch (error2) {
-        if (!pane_id) await client.call("pane.close", { pane_id: target }).catch(() => {
-        });
+        if (!pane_id) {
+          const hosted = await resolveAgent(client, target).catch(() => void 0);
+          if (!hosted) await client.call("pane.close", { pane_id: target }).catch(() => {
+          });
+        }
         throw error2;
       }
     }
